@@ -7,11 +7,11 @@ namespace M1_DELCARMEN.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class OrderController : ControllerBase
+public class OrdersController : ControllerBase
 {
     private readonly MarketplaceContext _context;
 
-    public OrderController(MarketplaceContext context)
+    public OrdersController(MarketplaceContext context)
     {
         _context = context;
     }

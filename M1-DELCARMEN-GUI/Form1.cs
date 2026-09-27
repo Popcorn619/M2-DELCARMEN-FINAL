@@ -39,9 +39,37 @@ public class Product
 
 public class CartItem
 {
-    public Product Product { get; set; }
+    public Product Product { get; set; } = null!;
     public int Quantity { get; set; }
     public decimal Subtotal => Product.Price * Quantity;
+}
+
+public class OrderItem
+{
+    public int Id { get; set; }
+    public int OrderId { get; set; }
+    public string ProductName { get; set; } = string.Empty;
+    public int ProductId { get; set; }
+    public int Quantity { get; set; }
+    public decimal UnitPrice { get; set; }
+    public Order? Order { get; set; }
+}
+
+public class Order
+{
+    public int Id { get; set; }
+    public string BuyerUsername { get; set; } = string.Empty;
+    
+    private List<OrderItem> _orderItems = new();
+    public List<OrderItem> OrderItems { get => _orderItems; set => _orderItems = value; }
+    public List<OrderItem> Items { get => _orderItems; set => _orderItems = value; }
+    public decimal TotalAmount { get; set; }
+    public string PaymentMethod { get; set; } = string.Empty;
+    public string ShippingMethod { get; set; } = string.Empty;
+    // API uses IsShipped
+    public bool IsShipped { get; set; } = false;
+    public string Status { get; set; } = string.Empty;
+    public DateTime OrderDate { get; set; }
 }
 
 public class CheckoutRequest
@@ -65,8 +93,9 @@ public class CardInfo
     public string CardholderName { get; set; } = string.Empty;
 }
 
-public class ApiClient
+public static class ApiClient
 {
+    // UPDATE PORT 
     private static readonly HttpClient http = new HttpClient { BaseAddress = new Uri("http://localhost:5000/") };
     private static readonly Random rnd = new Random();
 
@@ -152,11 +181,50 @@ public class ApiClient
     {
         try
         {
-            var res = await http.PostAsJsonAsync("api/Orders/checkout", req);
+            var order = new Order
+            {
+                BuyerUsername = req.Username,
+                TotalAmount = req.TotalAmount,
+                PaymentMethod = req.PaymentMethod,
+                ShippingMethod = req.ShippingMethod,
+                Status = "Order Placed",
+                OrderDate = req.OrderDate,
+                Items = req.Items.Select(i => new OrderItem
+                {
+                    ProductId = i.Product.Id,
+                    ProductName = i.Product.Name,
+                    Quantity = i.Quantity,
+                    UnitPrice = i.Product.Price
+                }).ToList()
+            };
+
+            var res = await http.PostAsJsonAsync("api/Orders", order);
             string msg = await res.Content.ReadAsStringAsync();
             return (res.IsSuccessStatusCode, res.IsSuccessStatusCode ? "Order Placed Successfully!" : msg);
         }
         catch (Exception ex) { return (false, "Error: " + ex.Message); }
+    }
+
+    public static async Task<List<Order>> GetAllOrdersAsync()
+    {
+        try
+        {
+            var resp = await http.GetAsync("api/Orders");
+            if (!resp.IsSuccessStatusCode)
+                return new List<Order>();
+            return await resp.Content.ReadFromJsonAsync<List<Order>>() ?? new List<Order>();
+        }
+        catch { return new List<Order>(); }
+    }
+
+    public static async Task<bool> MarkOrderAsShippedAsync(int orderId)
+    {
+        try
+        {
+            var resp = await http.PutAsync($"api/Orders/{orderId}/ship", null);
+            return resp.IsSuccessStatusCode;
+        }
+        catch { return false; }
     }
 }
 
@@ -179,6 +247,8 @@ public partial class Form1 : Form
     private Button btnCheckout;
     private Button btnAddProduct;
     private Button btnDeleteProduct;
+    private Button btnOrders;
+    private Button btnLogout;
     private PictureBox picProduct;
     private Button btnUploadImage;
 
@@ -191,23 +261,50 @@ public partial class Form1 : Form
         BackColor = LightYellow;
         SetupControls();
         Shown += async (s, e) => await StartLogin();
+        Load += Form1_Load;
+    }
+
+    private void Form1_Load(object sender, EventArgs e)
+    {
+        UpdateUIVisibility();
+    }
+
+    private void UpdateUIVisibility()
+    {
+        bool isLoggedIn = currentUser != null;
+        bool isAdmin = currentUser?.Role == "Admin";
+
+        if (btnOrders != null) btnOrders.Visible = isAdmin;
+        if (btnLogout != null) btnLogout.Visible = isLoggedIn;
+        if (btnAddProduct != null) btnAddProduct.Visible = isAdmin;
+        if (btnDeleteProduct != null) btnDeleteProduct.Visible = isAdmin;
     }
 
     private void SetupControls()
     {
-        lblStatus = new Label { Text = "Not logged in", Left = 20, Top = 10, Width = 900, Font = new Font("Segoe UI", 10F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
+        lblStatus = new Label { Text = "Not logged in", Left = 20, Top = 10, Width = 700, Font = new Font("Segoe UI", 10F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
         Controls.Add(lblStatus);
 
-        txtSearch = new TextBox { PlaceholderText = "Search by Product Name or Category...", Left = 20, Top = 40, Width = 600, BackColor = Color.White };
+        btnLogout = new Button { Name = "btnLogout", Text = "LOGOUT", Left = 980, Top = 5, Width = 180, Height = 35, BackColor = Color.DarkRed, ForeColor = Color.White, Font = new Font("Segoe UI", 9F, FontStyle.Bold), FlatStyle = FlatStyle.Flat, Visible = false };
+        btnLogout.FlatAppearance.BorderSize = 0;
+        btnLogout.Click += BtnLogout_Click;
+        Controls.Add(btnLogout);
+
+        txtSearch = new TextBox { PlaceholderText = "Search by Product Name or Category...", Left = 20, Top = 40, Width = 500, BackColor = Color.White };
         txtSearch.TextChanged += (s, e) => FilterProducts();
         Controls.Add(txtSearch);
 
-        btnAddProduct = new Button { Text = "+ Add New Product", Left = 640, Top = 35, Width = 180, Height = 35, BackColor = Color.Firebrick, ForeColor = Color.White, Font = new Font("Segoe UI", 9F, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
+        btnOrders = new Button { Name = "btnOrders", Text = "SALES / ORDERS", Left = 540, Top = 35, Width = 200, Height = 35, BackColor = Color.Green, ForeColor = Color.White, Font = new Font("Segoe UI", 9F, FontStyle.Bold), FlatStyle = FlatStyle.Flat, Visible = false };
+        btnOrders.FlatAppearance.BorderSize = 0;
+        btnOrders.Click += async (s, e) => await BtnOrders_Click();
+        Controls.Add(btnOrders);
+
+        btnAddProduct = new Button { Text = "+ Add New Product", Left = 760, Top = 35, Width = 180, Height = 35, BackColor = Color.Firebrick, ForeColor = Color.White, Font = new Font("Segoe UI", 9F, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
         btnAddProduct.FlatAppearance.BorderSize = 0;
         btnAddProduct.Click += async (s, e) => await ShowAddProductDialog();
         Controls.Add(btnAddProduct);
 
-        btnDeleteProduct = new Button { Text = "- Delete Selected Product", Left = 830, Top = 35, Width = 200, Height = 35, BackColor = Color.DarkRed, ForeColor = Color.White, Font = new Font("Segoe UI", 9F, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
+        btnDeleteProduct = new Button { Text = "- Delete Selected", Left = 960, Top = 35, Width = 200, Height = 35, BackColor = Color.DarkRed, ForeColor = Color.White, Font = new Font("Segoe UI", 9F, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
         btnDeleteProduct.FlatAppearance.BorderSize = 0;
         btnDeleteProduct.Click += async (s, e) => await DeleteSelectedProduct();
         Controls.Add(btnDeleteProduct);
@@ -238,7 +335,7 @@ public partial class Form1 : Form
         dgvProducts.Columns.Add("Code", "Code");
         dgvProducts.Columns.Add("Brand", "Brand");
         dgvProducts.Columns.Add("Category", "Category");
-        dgvProducts.Columns.Add("Price", "Price (P)");
+        dgvProducts.Columns.Add("Price", "Price (₱)");
         dgvProducts.Columns.Add("Email", "Email");
         dgvProducts.Columns.Add("GCash", "GCash Number");
         dgvProducts.Columns.Add("Stock", "Stock");
@@ -271,7 +368,7 @@ public partial class Form1 : Form
         dgvCart.DefaultCellStyle.SelectionForeColor = Color.Black;
         dgvCart.Columns.Add("Name", "Item");
         dgvCart.Columns.Add("Qty", "Qty");
-        dgvCart.Columns.Add("Subtotal", "Subtotal (P)");
+        dgvCart.Columns.Add("Subtotal", "Subtotal (₱)");
         Controls.Add(dgvCart);
 
         Label lblImgSection = new Label { Text = "Image Upload", Left = 640, Top = 445, Width = 530, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
@@ -285,7 +382,7 @@ public partial class Form1 : Form
         btnUploadImage.Click += (s, e) => UploadProductImage();
         Controls.Add(btnUploadImage);
 
-        lblTotal = new Label { Text = "TOTAL: P0.00", Left = 420, Top = 655, Width = 200, Font = new Font("Segoe UI", 12F, FontStyle.Bold), ForeColor = Color.DarkRed, TextAlign = ContentAlignment.MiddleRight, BackColor = Color.Transparent };
+        lblTotal = new Label { Text = "TOTAL: ₱0.00", Left = 420, Top = 655, Width = 200, Font = new Font("Segoe UI", 12F, FontStyle.Bold), ForeColor = Color.DarkRed, TextAlign = ContentAlignment.MiddleRight, BackColor = Color.Transparent };
         Controls.Add(lblTotal);
 
         nudQty = new NumericUpDown { Minimum = 1, Maximum = 100, Value = 1, Left = 20, Top = 655, Width = 80, BackColor = Color.White };
@@ -305,6 +402,141 @@ public partial class Form1 : Form
         btnCheckout.FlatAppearance.BorderSize = 0;
         btnCheckout.Click += async (s, e) => await ShowCheckoutDialog();
         Controls.Add(btnCheckout);
+    }
+
+    private void BtnLogout_Click(object? sender, EventArgs e)
+    {
+        currentUser = null;
+        cart.Clear();
+        UpdateCartDisplay();
+        lblStatus.Text = "Not logged in";
+        MessageBox.Show("Logged out successfully.", "Logout", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        Hide();
+        _ = StartLogin();
+        Show();
+    }
+
+    private async Task BtnOrders_Click()
+    {
+        if (currentUser?.Role != "Admin")
+        {
+            MessageBox.Show("You need to be an admin to view orders.", "Access Denied", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var orders = await ApiClient.GetAllOrdersAsync();
+
+        Form ordersForm = new Form
+        {
+            Text = "Sales / Orders — Admin",
+            Size = new Size(900, 550),
+            StartPosition = FormStartPosition.CenterParent,
+            BackColor = LightYellow
+        };
+
+        DataGridView dgvOrders = new DataGridView
+        {
+            Dock = DockStyle.Top,
+            Height = 450,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+            ReadOnly = true,
+            AllowUserToAddRows = false,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            BackgroundColor = Color.White,
+            GridColor = Color.LightGray,
+            EnableHeadersVisualStyles = false,
+            RowHeadersVisible = false
+        };
+        dgvOrders.ColumnHeadersDefaultCellStyle.BackColor = Color.Firebrick;
+        dgvOrders.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
+        dgvOrders.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+        dgvOrders.DefaultCellStyle.SelectionBackColor = Color.LightCoral;
+        dgvOrders.DefaultCellStyle.SelectionForeColor = Color.Black;
+        dgvOrders.Columns.Add("Id", "ID");
+        dgvOrders.Columns["Id"].Visible = false;
+        dgvOrders.Columns.Add("Buyer", "Buyer");
+        dgvOrders.Columns.Add("Product", "Product");
+        dgvOrders.Columns.Add("Qty", "Qty");
+        dgvOrders.Columns.Add("Total", "Total (₱)");
+        dgvOrders.Columns.Add("Payment", "Payment");
+        dgvOrders.Columns.Add("Shipping", "Shipping");
+        dgvOrders.Columns.Add("Status", "Status");
+        dgvOrders.Columns.Add("Date", "Order Date");
+
+        foreach (var o in orders)
+        {
+            string productList = string.Join(", ", o.Items.Select(i => i.ProductName));
+            int totalQty = o.Items.Sum(i => i.Quantity);
+
+            dgvOrders.Rows.Add(
+                o.Id,
+                o.BuyerUsername,
+                productList,
+                totalQty,
+                o.TotalAmount.ToString("N2"),
+                o.PaymentMethod,
+                o.ShippingMethod,
+                o.Status,
+                o.OrderDate.ToString("yyyy-MM-dd HH:mm")
+            );
+        }
+
+        Button btnShip = new Button
+        {
+            Text = "Ship — Waiting for Courier",
+            BackColor = Color.Green,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Dock = DockStyle.Bottom,
+            Height = 50,
+            Enabled = false
+        };
+
+        dgvOrders.SelectionChanged += (s, e) =>
+        {
+            if (dgvOrders.SelectedRows.Count == 0)
+            {
+                btnShip.Enabled = false;
+                return;
+            }
+            var status = dgvOrders.SelectedRows[0].Cells["Status"].Value?.ToString();
+            btnShip.Enabled = status == "Order Placed";
+        };
+
+        btnShip.Click += async (s, e) =>
+        {
+            if (dgvOrders.SelectedRows.Count == 0) return;
+            int orderId = Convert.ToInt32(dgvOrders.SelectedRows[0].Cells["Id"].Value);
+
+            var confirm = MessageBox.Show(
+                "Mark this order as Shipped?\nStatus will show: Waiting for courier",
+                "Confirm Shipment",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (confirm != DialogResult.Yes) return;
+
+            var success = await ApiClient.MarkOrderAsShippedAsync(orderId);
+            if (success)
+            {
+                MessageBox.Show(
+                    "Order Shipped!\nStatus: Waiting for courier",
+                    "Shipped",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                ordersForm.Close();
+                await BtnOrders_Click();
+            }
+            else
+            {
+                MessageBox.Show("Failed to update status", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        };
+
+        ordersForm.Controls.Add(dgvOrders);
+        ordersForm.Controls.Add(btnShip);
+        ordersForm.ShowDialog();
     }
 
     private void ShowSelectedProductImage()
@@ -328,6 +560,7 @@ public partial class Form1 : Form
             MessageBox.Show("Select a product from the list first!", "No Product Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+
         using (OpenFileDialog fd = new OpenFileDialog())
         {
             fd.Title = "Select Product Image";
@@ -366,14 +599,21 @@ public partial class Form1 : Form
         filteredProducts = string.IsNullOrEmpty(keyword)
             ? allProducts
             : allProducts.Where(p => p.Name.ToLower().Contains(keyword) || p.Category.ToLower().Contains(keyword)).ToList();
+
         foreach (var p in filteredProducts)
         {
-            dgvProducts.Rows.Add(p.Id, p.Name, p.Code, p.Brand, p.Category, "P" + p.Price.ToString("N2"), p.Email, p.GCashNumber, p.Stock);
+            dgvProducts.Rows.Add(p.Id, p.Name, p.Code, p.Brand, p.Category, "₱" + p.Price.ToString("N2"), p.Email, p.GCashNumber, p.Stock);
         }
     }
 
     private async Task ShowAddProductDialog()
     {
+        if (currentUser?.Role != "Admin")
+        {
+            MessageBox.Show("Admin access required.", "Access Denied", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         Form addForm = new Form { Text = "Add New Product", Size = new Size(420, 460), StartPosition = FormStartPosition.CenterParent, BackColor = LightYellow };
 
         Label lblName = new Label { Text = "Product Name:", Left = 30, Top = 20, Width = 300, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed };
@@ -388,7 +628,7 @@ public partial class Form1 : Form
         Label lblCat = new Label { Text = "Category:", Left = 30, Top = 200, Width = 300, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed };
         TextBox txtCat = new TextBox { Left = 30, Top = 225, Width = 340, BackColor = Color.White };
 
-        Label lblPrice = new Label { Text = "Price (P):", Left = 30, Top = 260, Width = 300, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed };
+        Label lblPrice = new Label { Text = "Price (₱):", Left = 30, Top = 260, Width = 300, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed };
         TextBox txtPrice = new TextBox { Left = 30, Top = 285, Width = 340, BackColor = Color.White };
 
         Label lblStock = new Label { Text = "Stock Quantity:", Left = 30, Top = 320, Width = 300, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed };
@@ -438,11 +678,18 @@ public partial class Form1 : Form
 
     private async Task DeleteSelectedProduct()
     {
+        if (currentUser?.Role != "Admin")
+        {
+            MessageBox.Show("Admin access required.", "Access Denied", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         if (dgvProducts.SelectedRows.Count == 0)
         {
             MessageBox.Show("Select a product from the list first!", "No Selection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+
         int id = Convert.ToInt32(dgvProducts.SelectedRows[0].Cells["Id"].Value);
         string name = dgvProducts.SelectedRows[0].Cells["Name"].Value?.ToString() ?? "";
 
@@ -469,6 +716,7 @@ public partial class Form1 : Form
         while (true)
         {
             Form login = new Form { Text = "Login", Size = new Size(360, 300), StartPosition = FormStartPosition.CenterScreen, BackColor = LightYellow, TopMost = true };
+
             TextBox txtUser = new TextBox { PlaceholderText = "Username", Left = 30, Top = 40, Width = 280, Font = new Font("Segoe UI", 10F), BackColor = Color.White };
             TextBox txtPass = new TextBox { PlaceholderText = "Password", Left = 30, Top = 100, Width = 280, PasswordChar = '•', Font = new Font("Segoe UI", 10F), BackColor = Color.White };
             Label lblError = new Label { Text = "", Left = 30, Top = 160, Width = 280, ForeColor = Color.Red, Font = new Font("Segoe UI", 9F), BackColor = Color.Transparent };
@@ -496,6 +744,7 @@ public partial class Form1 : Form
                 currentUser = result;
                 lblStatus.Text = "Logged in: " + currentUser.Username + " (" + currentUser.Role + ")";
                 login.Close();
+                UpdateUIVisibility();
                 await LoadProducts();
                 return;
             }
@@ -557,10 +806,10 @@ public partial class Form1 : Form
         decimal total = 0;
         foreach (var item in cart)
         {
-            dgvCart.Rows.Add(item.Product.Name, item.Quantity, "P" + item.Subtotal.ToString("N2"));
+            dgvCart.Rows.Add(item.Product.Name, item.Quantity, "₱" + item.Subtotal.ToString("N2"));
             total += item.Subtotal;
         }
-        lblTotal.Text = "TOTAL: P" + total.ToString("N2");
+        lblTotal.Text = "TOTAL: ₱" + total.ToString("N2");
     }
 
     private CardInfo? ShowCardForm()
@@ -609,13 +858,11 @@ public partial class Form1 : Form
                 lblError.Text = "Enter a valid card number (13-19 digits)!";
                 continue;
             }
-
             if (!Regex.IsMatch(expiry, @"^(0[1-9]|1[0-2])\/\d{2}$"))
             {
                 lblError.Text = "Use MM/YY format (e.g. 12/28)!";
                 continue;
             }
-
             string[] parts = expiry.Split('/');
             int month = int.Parse(parts[0]);
             int year = int.Parse(parts[1]) + 2000;
@@ -625,13 +872,11 @@ public partial class Form1 : Form
                 lblError.Text = "Card has expired!";
                 continue;
             }
-
             if (cvv.Length < 3 || cvv.Length > 4 || !cvv.All(char.IsDigit))
             {
                 lblError.Text = "Enter valid CVV (3-4 digits)!";
                 continue;
             }
-
             if (cardholderName.Length < 3)
             {
                 lblError.Text = "Enter cardholder full name!";
@@ -639,6 +884,7 @@ public partial class Form1 : Form
             }
 
             MessageBox.Show("Card Approved Successfully!\nPayment Processed.", "Approved", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
             return new CardInfo
             {
                 CardNumber = cardNum.Substring(cardNum.Length - 4).PadLeft(cardNum.Length, '*'),
@@ -684,10 +930,13 @@ public partial class Form1 : Form
         Label lblPhone = new Label { Text = "GCash: " + sellerGCash, Left = 30, Top = 100, Width = 420, Font = new Font("Segoe UI", 9F), ForeColor = Color.Black, BackColor = Color.Transparent };
         Label lblInstr = new Label { Text = "Upload your payment receipt/screenshot below:", Left = 30, Top = 135, Width = 420, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
         Label lblFileName = new Label { Text = "No file selected", Left = 30, Top = 165, Width = 420, Height = 35, Font = new Font("Segoe UI", 9F), ForeColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, BackColor = Color.White, Padding = new Padding(8) };
+
         Label lblAddress = new Label { Text = "Complete Address:", Left = 30, Top = 210, Width = 420, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
         TextBox txtAddress = new TextBox { Left = 30, Top = 235, Width = 420, Height = 60, Multiline = true, BackColor = Color.White };
+
         Label lblPhoneBuyer = new Label { Text = "Phone Number:", Left = 30, Top = 305, Width = 420, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
         TextBox txtPhoneBuyer = new TextBox { Left = 30, Top = 330, Width = 420, BackColor = Color.White };
+
         Label lblEmailBuyer = new Label { Text = "Email Address:", Left = 30, Top = 370, Width = 420, Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = Color.DarkRed, BackColor = Color.Transparent };
         TextBox txtEmailBuyer = new TextBox { Left = 30, Top = 395, Width = 420, BackColor = Color.White };
 
@@ -725,7 +974,7 @@ public partial class Form1 : Form
                 MessageBox.Show("Please upload a payment receipt first!", "Receipt Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return null;
             }
-            if (string.IsNullOrWhiteSpace(txtAddress.Text) || string.IsNullOrWhiteSpace(txtPhoneBuyer.Text) || string.IsNullOrWhiteSpace(txtEmailBuyer.Text))
+            if (string.IsNullOrEmpty(txtAddress.Text.Trim()))
             {
                 MessageBox.Show("Please fill in Complete Address, Phone Number, and Email Address!", "Missing Info", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return null;
@@ -738,27 +987,87 @@ public partial class Form1 : Form
     private async Task ShowCheckoutDialog()
     {
         SyncCartWithProducts();
-        if (cart.Count == 0) { MessageBox.Show("Cart is empty or items were removed!", "Cart Empty", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        if (cart.Count == 0)
+        {
+            MessageBox.Show("Cart is empty or items were removed!", "Cart Empty", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
-        Form checkout = new Form { Text = "Checkout", Size = new Size(420, 380), StartPosition = FormStartPosition.CenterParent, BackColor = LightYellow };
+        Form checkout = new Form
+        {
+            Text = "Checkout",
+            Size = new Size(420, 380),
+            StartPosition = FormStartPosition.CenterParent,
+            BackColor = LightYellow
+        };
 
-        Label lblPay = new Label { Text = "Payment Method:", Left = 30, Top = 30, Width = 340, Font = new Font("Segoe UI", 10F, FontStyle.Bold), ForeColor = Color.DarkRed };
-        ComboBox cboPay = new ComboBox { Left = 30, Top = 60, Width = 340, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = Color.White };
+        Label lblPay = new Label
+        {
+            Text = "Payment Method:",
+            Left = 30, Top = 30, Width = 340,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            ForeColor = Color.DarkRed
+        };
+        ComboBox cboPay = new ComboBox
+        {
+            Left = 30, Top = 60, Width = 340,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = Color.White
+        };
         cboPay.Items.AddRange(new[] { "GCash", "PayPal", "Credit Card / Debit Card" });
         cboPay.SelectedIndex = 0;
 
-        Label lblShip = new Label { Text = "Shipping Method:", Left = 30, Top = 110, Width = 340, Font = new Font("Segoe UI", 10F, FontStyle.Bold), ForeColor = Color.DarkRed };
-        ComboBox cboShip = new ComboBox { Left = 30, Top = 140, Width = 340, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = Color.White };
+        Label lblShip = new Label
+        {
+            Text = "Shipping Method:",
+            Left = 30, Top = 110, Width = 340,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            ForeColor = Color.DarkRed
+        };
+        ComboBox cboShip = new ComboBox
+        {
+            Left = 30, Top = 140, Width = 340,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = Color.White
+        };
         cboShip.Items.AddRange(new[] { "Lalamove", "J&T Express" });
         cboShip.SelectedIndex = 0;
 
         decimal totalAmount = cart.Sum(i => i.Subtotal);
-        Label lblTotalAmt = new Label { Text = "Total Amount: P" + totalAmount.ToString("N2"), Left = 30, Top = 190, Width = 340, Font = new Font("Segoe UI", 11F, FontStyle.Bold), ForeColor = Color.DarkRed };
+        Label lblTotalAmt = new Label
+        {
+            Text = "Total Amount: ₱" + totalAmount.ToString("N2"),
+            Left = 30, Top = 190, Width = 340,
+            Font = new Font("Segoe UI", 11F, FontStyle.Bold),
+            ForeColor = Color.DarkRed
+        };
 
-        Button btnPlace = new Button { Text = "Place Order", Left = 50, Top = 260, Width = 140, Height = 45, BackColor = Color.Firebrick, ForeColor = Color.White, Font = new Font("Segoe UI", 10F, FontStyle.Bold), FlatStyle = FlatStyle.Flat, DialogResult = DialogResult.OK };
-        Button btnCancel = new Button { Text = "Cancel", Left = 220, Top = 260, Width = 140, Height = 45, BackColor = Color.LightGray, Font = new Font("Segoe UI", 10F, FontStyle.Bold), FlatStyle = FlatStyle.Flat, DialogResult = DialogResult.Cancel };
+        Button btnPlace = new Button
+        {
+            Text = "Place Order",
+            Left = 50, Top = 260, Width = 140, Height = 45,
+            BackColor = Color.Firebrick, ForeColor = Color.White,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
+        };
+        Button btnCancel = new Button
+        {
+            Text = "Cancel",
+            Left = 220, Top = 260, Width = 140, Height = 45,
+            BackColor = Color.LightGray,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.Cancel
+        };
 
-        Label lblPaySel = new Label { Text = "Selected: " + cboPay.SelectedItem, Left = 30, Top = 320, Width = 340, ForeColor = Color.DarkRed, BackColor = Color.Transparent };
+        Label lblPaySel = new Label
+        {
+            Text = "Selected: " + cboPay.SelectedItem,
+            Left = 30, Top = 320, Width = 340,
+            ForeColor = Color.DarkRed,
+            BackColor = Color.Transparent
+        };
         cboPay.SelectedIndexChanged += (s, e) => lblPaySel.Text = "Selected: " + cboPay.SelectedItem;
 
         checkout.Controls.AddRange(new Control[] { lblPay, cboPay, lblShip, cboShip, lblTotalAmt, lblPaySel, btnPlace, btnCancel });
@@ -787,7 +1096,7 @@ public partial class Form1 : Form
             string confirmMsg = "Order Summary:\n\n" +
                 "Payment: " + paymentMethod + "\n" +
                 "Shipping: " + shippingMethod + "\n" +
-                "Total: P" + totalAmount.ToString("N2") + "\n";
+                "Total: ₱" + totalAmount.ToString("N2") + "\n";
             if (proofPath != null) confirmMsg += "Receipt Uploaded\n";
             if (cardDetails != null) confirmMsg += "Cardholder: " + cardDetails.CardholderName + "\nCard Approved!\n";
             confirmMsg += "\nConfirm Order?";
@@ -814,7 +1123,8 @@ public partial class Form1 : Form
                 foreach (var cartItem in cart)
                 {
                     var product = allProducts.FirstOrDefault(p => p.Id == cartItem.Product.Id);
-                    if (product != null) product.Stock -= cartItem.Quantity;
+                    if (product != null)
+                        product.Stock -= cartItem.Quantity;
                 }
 
                 string receipt = GenerateReceipt(req);
@@ -828,7 +1138,6 @@ public partial class Form1 : Form
             else
             {
                 MessageBox.Show("Failed:\n" + msg, "Checkout Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
             }
         }
     }
@@ -836,41 +1145,43 @@ public partial class Form1 : Form
     private string GenerateReceipt(CheckoutRequest order)
     {
         string lineSep = new string('-', 55);
-        string itemSep = new string('-', 55);
         string itemsList = "";
         foreach (var item in order.Items)
         {
-            itemsList += "  " + item.Product.Name.PadRight(25) + " x" + item.Quantity.ToString().PadLeft(3) + "  P" + item.Subtotal.ToString("N2").PadLeft(9) + "\n";
-            itemsList += "     " + item.Product.Email.PadRight(35) + "\n";
-            itemsList += "     " + item.Product.GCashNumber.PadRight(35) + "\n";
+            itemsList += "  " + item.Product.Name.PadRight(30) + " x" +
+                item.Quantity.ToString().PadLeft(3) + "  ₱" +
+                item.Subtotal.ToString("N2").PadLeft(9) + "\n";
+            itemsList += "     Seller: " + item.Product.Email + "\n";
+            itemsList += "     GCash:  " + item.Product.GCashNumber + "\n";
         }
 
         string cardInfo = order.CardDetails != null
-            ? "  Cardholder: " + order.CardDetails.CardholderName + "\n  Card No: ****-" + order.CardDetails.CardNumber.Substring(order.CardDetails.CardNumber.Length - 4) + "\n  Expiry: " + order.CardDetails.ExpiryDate + "\n"
+            ? "  Cardholder: " + order.CardDetails.CardholderName + "\n" +
+              "  Card No: ****" + order.CardDetails.CardNumber.Substring(order.CardDetails.CardNumber.Length - 4) + "\n" +
+              "  Expiry: " + order.CardDetails.ExpiryDate + "\n"
             : "";
 
         string receiptInfo = !string.IsNullOrEmpty(order.PaymentProofPath)
-            ? "  Payment Proof: Uploaded Successfully\n"
+            ? "  Payment Receipt: Uploaded\n"
             : "";
 
-        string receipt =
+        return
             "\n M1-DELCARMEN MARKETPLACE\n" +
             "  OFFICIAL ORDER RECEIPT\n" +
             lineSep + "\n" +
-            "  Date:     " + order.OrderDate.ToString("yyyy-MM-dd HH:mm:ss") + "\n" +
-            "  Customer: " + order.Username + "\n" +
-            itemSep + "\n" +
-            "  ORDER ITEMS:\n" +
+            "  Date/Time:   " + order.OrderDate.ToString("yyyy-MM-dd HH:mm:ss") + "\n" +
+            "  Customer:    " + order.Username + "\n" +
+            lineSep + "\n" +
+            "  ITEMS PURCHASED:\n" +
             itemsList +
-            itemSep + "\n" +
-            "  Payment:  " + order.PaymentMethod + "\n" +
-            "  Shipping: " + order.ShippingMethod + "\n" +
-            cardInfo + receiptInfo +
             lineSep + "\n" +
-            "  TOTAL AMOUNT:  P" + order.TotalAmount.ToString("N2") + "\n" +
+            "  Payment Method:  " + order.PaymentMethod + "\n" +
+            "  Shipping Method: " + order.ShippingMethod + "\n" +
+            cardInfo +
+            receiptInfo +
             lineSep + "\n" +
-            "  Thank you for your order!\n\n";
-
-        return receipt;
+            "  TOTAL AMOUNT:     ₱" + order.TotalAmount.ToString("N2") + "\n" +
+            lineSep + "\n" +
+            "  Thank you for your purchase!\n";
     }
 }
